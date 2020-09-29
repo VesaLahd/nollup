@@ -1,4 +1,5 @@
 let es_to_cjs = require('../../lib/impl/ImportExportResolver');
+let live_bindings_resolver = require('../../lib/impl/LiveBindingsResolver');
 let { expect } = require('../nollup');
 let path = require('path');
 
@@ -895,4 +896,458 @@ describe ('Export Live Bindings', () => {
             'hello = 123;__e__(\'hello\', typeof hello !== \'undefined\' && hello);'
         ].join('\n'));
     });
+});
+
+describe ('Import Live Bindings', () => {
+    async function resolve (code) {
+        let ctx = { plugins: [], liveBindings: true };
+        let curr = process.cwd() + '/_entry';
+        let res1 = await es_to_cjs(ctx, code.join('\n'), curr);
+        let res2 = live_bindings_resolver(ctx, res1.code, curr, res1.imports);
+        return res2.code;
+    }
+
+    it ('should change import usage to binding variable', async () => {
+        let res = await resolve([
+            'import MyVar1 from "./myfile";',
+            'console.log(MyVar1);'
+        ]);
+        expect(res).to.equal([
+            '                              ',
+            'console.log(__i__["MyVar1"]);'
+        ].join('\n'));
+    });
+
+    it ('should change import usage to binding variable for named', async () => {
+        let res = await resolve([
+            'import MyDefault, { MyVar1, MyVar2 } from "./myfile";',
+            'console.log(MyDefault, MyVar1, MyVar2);'
+        ]);
+        expect(res).to.equal([
+            '                                                     ',
+            'console.log(__i__["MyDefault"], __i__["MyVar1"], __i__["MyVar2"]);'
+        ].join('\n'));
+    });
+
+    it ('should allow shadowing by function declaration params', async () => {
+        let res = await resolve([
+            'import MyDefault, { MyVar } from "./myfile";',
+            'function MyFunction (MyDefault) {',
+            '    console.log(MyDefault, MyVar);',
+            '}',
+            'console.log(MyDefault);'
+        ]);
+        expect(res).to.equal([
+            '                                            ',
+            'function MyFunction (MyDefault) {',
+            '    console.log(MyDefault, __i__["MyVar"]);',
+            '}',
+            'console.log(__i__["MyDefault"]);'
+        ].join('\n'));
+    });
+
+    it ('should allow nested function shadowing', async () => {
+        let res = await resolve([
+            'import MyDefault from "./myfile";',
+            'function MyFunction () {',
+            '    console.log(MyDefault);',
+            '    function MyNestedFunction (MyDefault) {',
+            '       console.log(MyDefault);',
+            '    }',
+            '}'
+        ]);
+        expect(res).to.equal([
+            '                                 ',
+            'function MyFunction () {',
+            '    console.log(__i__["MyDefault"]);',
+            '    function MyNestedFunction (MyDefault) {',
+            '       console.log(MyDefault);',
+            '    }',
+            '}'
+        ].join('\n'));
+    });
+
+    it ('should allow shadowing by function expression params', async () => {
+        let res = await resolve([
+            'import MyDefault, { MyVar } from "./myfile";',
+            'var MyFunction = function (MyDefault) {',
+            '    console.log(MyDefault, MyVar);',
+            '}',
+            'console.log(MyDefault);'
+        ]);
+        expect(res).to.equal([
+            '                                            ',
+            'var MyFunction = function (MyDefault) {',
+            '    console.log(MyDefault, __i__["MyVar"]);',
+            '}',
+            'console.log(__i__["MyDefault"]);'
+        ].join('\n'));
+    });
+
+    it ('should allow shadowing by arrow function expression params', async () => {
+        let res = await resolve([
+            'import MyDefault, { MyVar } from "./myfile";',
+            'var MyFunction = (MyDefault) => {',
+            '    console.log(MyDefault, MyVar);',
+            '}',
+            'console.log(MyDefault);'
+        ]);
+        expect(res).to.equal([
+            '                                            ',
+            'var MyFunction = (MyDefault) => {',
+            '    console.log(MyDefault, __i__["MyVar"]);',
+            '}',
+            'console.log(__i__["MyDefault"]);'
+        ].join('\n'));
+    });
+
+    it ('should allow shadowing by var declaration in a block', async () => {
+        let res = await resolve([
+            'import MyDefault from "./myfile";',
+            'console.log(MyDefault);',
+            '{',
+            '    console.log(MyDefault);',
+            '    {',
+            '       let MyDefault;',
+            '       console.log(MyDefault)',
+            '    }',
+            '    console.log(MyDefault);',
+            '}' 
+        ]);
+        expect(res).to.equal([
+            '                                 ',
+            'console.log(__i__["MyDefault"]);',
+            '{',
+            '    console.log(__i__["MyDefault"]);',
+            '    {',
+            '       let MyDefault;',
+            '       console.log(MyDefault)',
+            '    }',
+            '    console.log(__i__["MyDefault"]);',
+            '}' 
+        ].join('\n'));
+    });
+
+    it ('should allow shadowing by local variable in function', async () => {
+        let res = await resolve([
+            'import MyDefault from "./myfile";',
+            'console.log(MyDefault);',
+            'function MyFunction () {',
+            '    var MyDefault',
+            '    console.log(MyDefault);',
+            '}',
+            'console.log(MyDefault)'
+        ]);
+        expect(res).to.equal([
+            '                                 ',
+            'console.log(__i__["MyDefault"]);',
+            'function MyFunction () {',
+            '    var MyDefault',
+            '    console.log(MyDefault);',
+            '}',
+            'console.log(__i__["MyDefault"])'
+        ].join('\n'));
+    });
+
+     it ('should support object declarations using a binding', async () => {
+        let res = await resolve([
+            'import MyDefault from "./myfile";',
+            'var obj1 = { MyDefault }',
+            'var obj2 = { Other: MyDefault }',
+            'var obj3 = { MyDefault: MyDefault }',
+            'var obj4 = { MyDefault: Other }'
+        ]);
+        expect(res).to.equal([
+            '                                 ',
+            'var obj1 = { MyDefault: __i__["MyDefault"] }',
+            'var obj2 = { Other: __i__["MyDefault"] }',
+            'var obj3 = { MyDefault: __i__["MyDefault"] }',
+            'var obj4 = { MyDefault: Other }'
+        ].join('\n'));
+    });
+
+    it ('should support export statement with a binding', async () => {
+        let res = await resolve([
+            'import MyDefault from "./myfile";',
+            'export { MyDefault as MyDefault }'
+        ]);
+        expect(res).to.equal([
+            '                                 ',
+            '                                 __e__(\'MyDefault\', __i__["MyDefault"]);',
+        ].join('\n'));
+    });
+
+    it ('should not transform identifier on object keys', async () => {
+        let res = await resolve([
+            'import MyDefault from "./myfile";',
+            'var obj = { MyDefault: 123 }',
+            'console.log(obj.MyDefault)'
+        ]);
+        expect(res).to.equal([
+            '                                 ',
+            'var obj = { MyDefault: 123 }',
+            'console.log(obj.MyDefault)'
+        ].join('\n'));
+    });
+
+    it ('should support shadowing by array variable declarations', async () => {
+        let res = await resolve([
+            'import MyDefault from "./myfile";',
+            'function MyFunction () {',
+            '    var [ MyDefault, Other ] = someFn();',
+            '    console.log(MyDefault);',
+            '}',
+            'console.log(MyDefault)'
+        ]);
+        expect(res).to.equal([
+            '                                 ',
+            'function MyFunction () {',
+            '    var [ MyDefault, Other ] = someFn();',
+            '    console.log(MyDefault);',
+            '}',
+            'console.log(__i__["MyDefault"])'
+        ].join('\n'));
+    });
+
+    it ('should support shadowing by nested array variable declarations', async () => {
+        let res = await resolve([
+            'import MyDefault from "./myfile";',
+            'function MyFunction () {',
+            '    var [ A, [ MyDefault, B ]] = someFn();',
+            '    console.log(MyDefault);',
+            '}',
+            'console.log(MyDefault)'
+        ]);
+        expect(res).to.equal([
+            '                                 ',
+            'function MyFunction () {',
+            '    var [ A, [ MyDefault, B ]] = someFn();',
+            '    console.log(MyDefault);',
+            '}',
+            'console.log(__i__["MyDefault"])'
+        ].join('\n'));
+    });
+
+    it ('should support shadowing by nested array variable declarations with omitted', async () => {
+        let res = await resolve([
+            'import MyDefault from "./myfile";',
+            'function MyFunction () {',
+            '    var [, [, MyDefault ]] = someFn();',
+            '    console.log(MyDefault);',
+            '}',
+            'console.log(MyDefault)'
+        ]);
+        expect(res).to.equal([
+            '                                 ',
+            'function MyFunction () {',
+            '    var [, [, MyDefault ]] = someFn();',
+            '    console.log(MyDefault);',
+            '}',
+            'console.log(__i__["MyDefault"])'
+        ].join('\n'));
+    });
+
+    it ('should support shadowing by destructured variable declarations', async () => {
+        let res = await resolve([
+            'import MyDefault from "./myfile";',
+            'function MyFunction () {',
+            '    var { MyDefault, Other } = someFn();',
+            '    console.log(MyDefault);',
+            '}',
+            'console.log(MyDefault)'
+        ]);
+        expect(res).to.equal([
+            '                                 ',
+            'function MyFunction () {',
+            '    var { MyDefault, Other } = someFn();',
+            '    console.log(MyDefault);',
+            '}',
+            'console.log(__i__["MyDefault"])'
+        ].join('\n'));
+    });
+
+    it ('should support shadowing by renamed destructured variable declarations', async () => {
+        let res = await resolve([
+            'import MyDefault, { MyVar } from "./myfile";',
+            'function MyFunction () {',
+            '    var { Other: MyDefault, MyVar: Something } = someFn();',
+            '    console.log(MyDefault, MyVar);',
+            '}',
+            'console.log(MyDefault, MyVar)'
+        ]);
+        expect(res).to.equal([
+            '                                            ',
+            'function MyFunction () {',
+            '    var { Other: MyDefault, MyVar: Something } = someFn();',
+            '    console.log(MyDefault, __i__["MyVar"]);',
+            '}',
+            'console.log(__i__["MyDefault"], __i__["MyVar"])'
+        ].join('\n'));
+    });
+
+    it ('should support shadowing by nested destructured variable declarations', async () => {
+        let res = await resolve([
+            'import MyDefault from "./myfile";',
+            'function MyFunction () {',
+            '    var { A, Other: { MyDefault, B } } = someFn();',
+            '    console.log(MyDefault);',
+            '}',
+            'console.log(MyDefault)'
+        ]);
+        expect(res).to.equal([
+            '                                 ',
+            'function MyFunction () {',
+            '    var { A, Other: { MyDefault, B } } = someFn();',
+            '    console.log(MyDefault);',
+            '}',
+            'console.log(__i__["MyDefault"])'
+        ].join('\n'));
+    });
+
+    it ('should modify implicit arrow function expressions', async () => {
+        let res = await resolve([
+            'import MyDefault from "./myfile";',
+            'let fn = () => MyDefault(123);'
+        ]);
+        expect(res).to.equal([
+            '                                 ',
+            'let fn = () => __i__["MyDefault"](123);'
+        ].join('\n'));
+    });
+});
+
+describe ('Export Live Bindings Full', () => {
+    async function resolve (code) {
+        let ctx = { plugins: [], liveBindings: true };
+        let curr = process.cwd() + '/_entry';
+        let res1 = await es_to_cjs(ctx, code.join('\n'), curr);
+        let res2 = live_bindings_resolver(ctx, res1.code, curr, res1.imports);
+        return res2.code;
+    }
+
+    it ('should only modify export variables after exporting', async () => {
+        let res = await resolve([
+            'var MyVar = 123;',
+            'export { MyVar };',
+            'MyVar = 456;'
+        ]);
+        expect(res).to.equal([
+            'var MyVar = 123;',
+            '                 __e__(\'MyVar\', MyVar);',
+            '__lbe__["MyVar"] = 456;'
+        ].join('\n'));
+    });
+
+    it ('should modify export variables if they are in a function before the export', async () => {
+        let res = await resolve([
+            'function MyFunction () { MyVar++ }',
+            'var MyVar = 123;',
+            'export { MyVar };'
+        ]);
+        expect(res).to.equal([
+            'function MyFunction () { __lbe__["MyVar"]++ }',
+            'var MyVar = 123;',
+            '                 __e__(\'MyVar\', MyVar);',
+        ].join('\n'));
+    });
+
+    it ('should not override variable declarations inside functions', async () => {
+        let res = await resolve([
+            'function MyFunction () { console.log(MyVar); var MyVar = 123; }',
+            'var MyVar = 123;',
+            'export { MyVar };'
+        ]);
+        expect(res).to.equal([
+            'function MyFunction () { console.log(MyVar); var MyVar = 123; }',
+            'var MyVar = 123;',
+            '                 __e__(\'MyVar\', MyVar);',
+        ].join('\n'));
+    });
+
+    it ('should not override export variable usage nested deep on top level before export', async () => {
+        let res = await resolve([
+            'var MyVar = 123;',
+            'console.log(MyVar);',
+            'export { MyVar };',
+            'MyVar = 456;',
+            'console.log(MyVar);'
+        ]);
+        expect(res).to.equal([
+            'var MyVar = 123;',
+            'console.log(MyVar);',
+            '                 __e__(\'MyVar\', MyVar);',
+            '__lbe__["MyVar"] = 456;',
+            'console.log(__lbe__["MyVar"]);'
+        ].join('\n'));
+    });
+
+    it ('should not override same name variable in block scope on top level', async () => {
+        let res = await resolve([
+            '{ let MyVar = 123; }',
+            'let MyVar = 123;',
+            'export { MyVar };',
+            'console.log(MyVar);',
+            '{ let MyVar = 123; }'
+        ]);
+        expect(res).to.equal([
+            '{ let MyVar = 123; }',
+            'let MyVar = 123;',
+            '                 __e__(\'MyVar\', MyVar);',
+            'console.log(__lbe__["MyVar"]);',
+            '{ let MyVar = 123; }'
+        ].join('\n'));
+    });
+
+    it ('should not override same name variable that is exported as default', async () => {
+        let res = await resolve([
+            'var MyVar;',
+            'if (true) { MyVar = 123; }',
+            'export default MyVar;'
+        ]);
+        expect(res).to.equal([
+            'var MyVar;',
+            'if (true) { MyVar = 123; }',
+            '__e__(\'default\', MyVar);;'
+        ].join('\n'));            
+    });
+
+    it ('should be shadowed by nested function statements', async () => {
+        let res = await resolve([
+            'var MyVar = function () {',
+            '    console.log(MyVar);',
+            '    function MyVar () {',
+            '       console.log(MyVar);',
+            '    }',
+            '};',
+            'export { MyVar }'
+        ]);
+        expect(res).to.equal([
+            'var MyVar = function () {',
+            '    console.log(MyVar);',
+            '    function MyVar () {',
+            '       console.log(MyVar);',
+            '    }',
+            '};',
+            '                __e__(\'MyVar\', MyVar);'
+        ].join('\n'));            
+    })
+
+    it ('should not convert for loops inside functions', async () => {
+        let res = await resolve([
+            'var MyVar = function () {',
+            '    for (var MyVar = 0; i < 10; i++) {',
+            '       console.log(MyVar);',
+            '    }',
+            '};',
+            'export { MyVar }'
+        ]);
+        expect(res).to.equal([
+            'var MyVar = function () {',
+            '    for (var MyVar = 0; i < 10; i++) {',
+            '       console.log(MyVar);',
+            '    }',
+            '};',
+            '                __e__(\'MyVar\', MyVar);'
+        ].join('\n'));            
+    })
 });
